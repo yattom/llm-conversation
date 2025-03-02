@@ -8,6 +8,7 @@ import {
   Button, 
   List, 
   ListItem, 
+  ListItemText,
   Divider, 
   FormControl, 
   InputLabel, 
@@ -25,7 +26,10 @@ import {
   Snackbar,
   Alert,
   Switch,
-  FormControlLabel
+  FormControlLabel,
+  Slider,
+  Tabs,
+  Tab
 } from '@mui/material';
 import { createTheme, ThemeProvider } from '@mui/material/styles';
 
@@ -46,7 +50,7 @@ const theme = createTheme({
 const API_URL = 'http://localhost:8000';
 
 function App() {
-  console.log("App component");
+  // States
   const [characters, setCharacters] = useState([]);
   const [conversations, setConversations] = useState([]);
   const [selectedConversation, setSelectedConversation] = useState(null);
@@ -54,17 +58,26 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [openCreateCharacter, setOpenCreateCharacter] = useState(false);
   const [openCreateConversation, setOpenCreateConversation] = useState(false);
+  const [openSettings, setOpenSettings] = useState(false);
   const [notification, setNotification] = useState({ open: false, message: '', severity: 'info' });
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [autoRefreshInterval, setAutoRefreshInterval] = useState(10);
   const autoRefreshTimerRef = React.useRef(null);
+  const [availableModels, setAvailableModels] = useState([]);
+  const [modelLoadingStatus, setModelLoadingStatus] = useState({});
+  const [systemConfig, setSystemConfig] = useState({
+    active_model: 'llama3:8b',
+    temperature: 0.7,
+    max_tokens: 1024
+  });
+  const [settingsTab, setSettingsTab] = useState(0);
+  const [healthStatus, setHealthStatus] = useState({ status: 'unknown' });
+  const [refreshingModels, setRefreshingModels] = useState(false);
+
   // New character form state
   const [newCharacter, setNewCharacter] = useState({
     name: '',
-    model: 'llama3:8b',
     system_prompt: '',
-    temperature: 0.7,
-    max_tokens: 1024,
     personality_traits: {}
   });
   
@@ -75,17 +88,76 @@ function App() {
     num_turns: 5
   });
 
+  // Initial data loading
   useEffect(() => {
     fetchCharacters();
     fetchConversations();
+    fetchSystemConfig();
+    fetchAvailableModels();
+    checkHealth();
   }, []);
 
+  // Load conversation details when selected
   useEffect(() => {
     if (selectedConversation) {
       fetchConversationDetails(selectedConversation);
     }
   }, [selectedConversation]);
 
+  // Start polling for model loading status
+  useEffect(() => {
+    const pollModelLoadingStatus = () => {
+      const interval = setInterval(async () => {
+        try {
+          const response = await fetch(`${API_URL}/system/models/status`);
+          if (response.ok) {
+            const data = await response.json();
+            setModelLoadingStatus(data);
+            
+            // If any model is loading, fetch available models to update UI
+            if (Object.values(data).some(status => status === true)) {
+              fetchAvailableModels();
+              fetchSystemConfig();
+            }
+          }
+        } catch (error) {
+          console.error('Error fetching model loading status:', error);
+        }
+      }, 3000);
+      
+      return () => clearInterval(interval);
+    };
+    
+    return pollModelLoadingStatus();
+  }, []);
+
+  // Auto-refresh conversation
+  useEffect(() => {
+    const startTimer = () => {
+      console.log(`Starting auto-refresh timer: ${autoRefreshInterval} seconds`);
+      autoRefreshTimerRef.current = setInterval(() => {
+        if (!loading && selectedConversation) {
+          continueConversation();
+        }
+      }, autoRefreshInterval * 1000);
+    };
+
+    const clearTimer = () => {
+      if (autoRefreshTimerRef.current) {
+        clearInterval(autoRefreshTimerRef.current);
+        autoRefreshTimerRef.current = null;
+      }
+    };
+
+    clearTimer();
+    if (autoRefresh && selectedConversation) {
+      startTimer();
+    }
+  
+    return clearTimer;
+  }, [autoRefresh, autoRefreshInterval, selectedConversation, loading]);
+
+  // Data fetching functions
   const fetchCharacters = async () => {
     try {
       const response = await fetch(`${API_URL}/characters`);
@@ -131,6 +203,51 @@ function App() {
     }
   };
 
+  const fetchSystemConfig = async () => {
+    try {
+      const response = await fetch(`${API_URL}/system/config`);
+      if (response.ok) {
+        const data = await response.json();
+        setSystemConfig(data);
+      } else {
+        console.error('Failed to fetch system config');
+      }
+    } catch (error) {
+      console.error('Error fetching system config:', error);
+    }
+  };
+
+  const fetchAvailableModels = async () => {
+    setRefreshingModels(true);
+    try {
+      const response = await fetch(`${API_URL}/system/models`);
+      if (response.ok) {
+        const data = await response.json();
+        setAvailableModels(data);
+      } else {
+        console.error('Failed to fetch available models');
+      }
+    } catch (error) {
+      console.error('Error fetching available models:', error);
+    } finally {
+      setRefreshingModels(false);
+    }
+  };
+
+  const checkHealth = async () => {
+    try {
+      const response = await fetch(`${API_URL}/health`);
+      if (response.ok) {
+        const data = await response.json();
+        setHealthStatus(data);
+      }
+    } catch (error) {
+      console.error('Error checking health:', error);
+      setHealthStatus({ status: 'error', message: error.message });
+    }
+  };
+
+  // Action functions
   const handleCreateCharacter = async () => {
     try {
       const response = await fetch(`${API_URL}/characters`, {
@@ -150,10 +267,7 @@ function App() {
         setOpenCreateCharacter(false);
         setNewCharacter({
           name: '',
-          model: 'llama3:8b',
           system_prompt: '',
-          temperature: 0.7,
-          max_tokens: 1024,
           personality_traits: {}
         });
         fetchCharacters();
@@ -228,6 +342,85 @@ function App() {
     }
   };
 
+  const handleUpdateSystemConfig = async () => {
+    try {
+      const response = await fetch(`${API_URL}/system/config`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(systemConfig),
+      });
+      
+      if (response.ok) {
+        setNotification({ 
+          open: true, 
+          message: 'System configuration updated successfully!', 
+          severity: 'success' 
+        });
+      } else {
+        const error = await response.json();
+        setNotification({ 
+          open: true, 
+          message: `Failed to update system configuration: ${error.detail}`, 
+          severity: 'error' 
+        });
+      }
+    } catch (error) {
+      setNotification({ 
+        open: true, 
+        message: `Error updating system configuration: ${error.message}`, 
+        severity: 'error' 
+      });
+    }
+  };
+
+  const handleLoadModel = async (modelName) => {
+    try {
+      // Check if the model is already loading
+      if (modelLoadingStatus[modelName]) {
+        setNotification({
+          open: true,
+          message: `Model ${modelName} is already loading...`,
+          severity: 'info'
+        });
+        return;
+      }
+      
+      const response = await fetch(`${API_URL}/system/models/load`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ model_name: modelName }),
+      });
+      
+      if (response.ok) {
+        setNotification({ 
+          open: true, 
+          message: `Started loading model ${modelName}. This may take a few minutes.`, 
+          severity: 'info' 
+        });
+        
+        // Update loading status immediately for better UX
+        setModelLoadingStatus(prev => ({...prev, [modelName]: true}));
+      } else {
+        const error = await response.json();
+        setNotification({ 
+          open: true, 
+          message: `Failed to load model: ${error.detail}`, 
+          severity: 'error' 
+        });
+      }
+    } catch (error) {
+      setNotification({ 
+        open: true, 
+        message: `Error loading model: ${error.message}`, 
+        severity: 'error' 
+      });
+    }
+  };
+
   const continueConversation = React.useCallback(async () => {
     if (!selectedConversation || loading) return;
     
@@ -270,44 +463,7 @@ function App() {
     } finally {
       setLoading(false);
     }
-  }, [selectedConversation, loading, API_URL, setAutoRefresh]);
-
-
-  useEffect(() => {
-    console.log("Auto-refresh effect triggered:", { autoRefresh, selectedConversation, loading });
-  
-    const startTimer = () => {
-      console.log(`Starting auto-refresh timer: ${autoRefreshInterval} seconds`);
-      autoRefreshTimerRef.current = setInterval(() => {
-        console.log("Auto-refresh interval fired, continuing conversation...");
-        if (!loading && selectedConversation) {
-          continueConversation();
-        } else {
-          console.log("Skipping auto-refresh due to loading state or no conversation selected");
-        }
-      }, autoRefreshInterval * 1000);
-    };
-
-    const clearTimer = () => {
-      if (autoRefreshTimerRef.current) {
-        console.log("Clearing existing auto-refresh timer");
-        clearInterval(autoRefreshTimerRef.current);
-        autoRefreshTimerRef.current = null;
-      }
-    };
-
-    // Clear any existing timer
-    clearTimer();
-  
-    // Start a new timer if conditions are met
-    if (autoRefresh && selectedConversation) {
-      startTimer();
-    }
-  
-    // Cleanup function
-    return clearTimer;
-  }, [autoRefresh, autoRefreshInterval, selectedConversation, loading, continueConversation]);
-
+  }, [selectedConversation, loading]);
 
   const handleCloseNotification = () => {
     setNotification({ ...notification, open: false });
@@ -324,12 +480,52 @@ function App() {
     return `hsl(${hue}, 70%, 50%)`;
   };
 
+  const getModelStatusLabel = (modelName) => {
+    if (modelLoadingStatus[modelName]) {
+      return "Loading...";
+    }
+    if (systemConfig.active_model === modelName) {
+      return "Active";
+    }
+    return "Available";
+  };
+
+  const getModelStatusColor = (modelName) => {
+    if (modelLoadingStatus[modelName]) {
+      return "orange";
+    }
+    if (systemConfig.active_model === modelName) {
+      return "green";
+    }
+    return "gray";
+  };
+
   return (
     <ThemeProvider theme={theme}>
       <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
-        <Typography variant="h3" component="h1" gutterBottom align="center">
-          AI Character Conversations
-        </Typography>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+          <Typography variant="h3" component="h1" gutterBottom>
+            AI Character Conversations
+          </Typography>
+          <Button 
+            variant="outlined" 
+            startIcon={<div>⚙️</div>} 
+            onClick={() => setOpenSettings(true)}
+          >
+            Settings
+          </Button>
+        </Box>
+
+        <Box sx={{ mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+          <Chip 
+            label={`Model: ${systemConfig.active_model}`} 
+            color={modelLoadingStatus[systemConfig.active_model] ? "warning" : "primary"}
+            size="medium"
+          />
+          {modelLoadingStatus[systemConfig.active_model] && (
+            <CircularProgress size={20} />
+          )}
+        </Box>
         
         <Box sx={{ mb: 4 }}>
           <Grid container spacing={2}>
@@ -351,7 +547,7 @@ function App() {
                       Create Character
                     </Button>
                   </Box>
-                  <List>
+                  <List sx={{ maxHeight: 300, overflow: 'auto' }}>
                     {characters.map((character) => (
                       <React.Fragment key={character}>
                         <ListItem>
@@ -387,7 +583,7 @@ function App() {
                       New Conversation
                     </Button>
                   </Box>
-                  <List>
+                  <List sx={{ maxHeight: 300, overflow: 'auto' }}>
                     {conversations.map((conversation) => (
                       <React.Fragment key={conversation}>
                         <ListItem button onClick={() => setSelectedConversation(conversation)}>
@@ -510,40 +706,12 @@ function App() {
           <DialogTitle>Create New AI Character</DialogTitle>
           <DialogContent>
             <Grid container spacing={2} sx={{ mt: 1 }}>
-              <Grid item xs={12} sm={6}>
+              <Grid item xs={12}>
                 <TextField
                   label="Character Name"
                   fullWidth
                   value={newCharacter.name}
                   onChange={(e) => setNewCharacter({...newCharacter, name: e.target.value})}
-                />
-              </Grid>
-              <Grid item xs={12} sm={6}>
-                <TextField
-                  label="Model"
-                  fullWidth
-                  value={newCharacter.model}
-                  onChange={(e) => setNewCharacter({...newCharacter, model: e.target.value})}
-                  helperText="Model name in Ollama (e.g., llama3:8b, deepseek:7b, ...)"
-                />
-              </Grid>
-              <Grid item xs={12} sm={6}>
-                <TextField
-                  label="Temperature"
-                  type="number"
-                  fullWidth
-                  value={newCharacter.temperature}
-                  onChange={(e) => setNewCharacter({...newCharacter, temperature: parseFloat(e.target.value)})}
-                  inputProps={{ min: 0, max: 2, step: 0.1 }}
-                />
-              </Grid>
-              <Grid item xs={12} sm={6}>
-                <TextField
-                  label="Max Tokens"
-                  type="number"
-                  fullWidth
-                  value={newCharacter.max_tokens}
-                  onChange={(e) => setNewCharacter({...newCharacter, max_tokens: parseInt(e.target.value)})}
                 />
               </Grid>
               <Grid item xs={12}>
@@ -564,7 +732,7 @@ function App() {
             <Button 
               onClick={handleCreateCharacter} 
               variant="contained"
-              disabled={!newCharacter.name || !newCharacter.model || !newCharacter.system_prompt}
+              disabled={!newCharacter.name || !newCharacter.system_prompt}
             >
               Create Character
             </Button>
@@ -630,7 +798,7 @@ function App() {
           </DialogContent>
           <DialogActions>
             <Button onClick={() => setOpenCreateConversation(false)}>Cancel</Button>
-            <Button 
+	  <Button 
               onClick={handleCreateConversation} 
               variant="contained"
               disabled={
@@ -641,6 +809,153 @@ function App() {
             >
               {loading ? <CircularProgress size={24} /> : 'Start Conversation'}
             </Button>
+          </DialogActions>
+        </Dialog>
+        
+        {/* Settings Dialog */}
+        <Dialog open={openSettings} onClose={() => setOpenSettings(false)} fullWidth maxWidth="md">
+          <DialogTitle>System Settings</DialogTitle>
+          <DialogContent>
+            <Tabs 
+              value={settingsTab} 
+              onChange={(e, newValue) => setSettingsTab(newValue)}
+              centered
+              sx={{ mb: 2 }}
+            >
+              <Tab label="Model Settings" />
+              <Tab label="Available Models" />
+            </Tabs>
+            
+            {settingsTab === 0 && (
+              <Grid container spacing={2}>
+                <Grid item xs={12}>
+                  <Typography variant="h6" gutterBottom>
+                    Model Configuration
+                  </Typography>
+                </Grid>
+                <Grid item xs={12}>
+                  <FormControl fullWidth>
+                    <InputLabel>Active Model</InputLabel>
+                    <Select
+                      value={systemConfig.active_model}
+                      onChange={(e) => setSystemConfig({...systemConfig, active_model: e.target.value})}
+                      disabled={Object.values(modelLoadingStatus).some(status => status === true)}
+                    >
+                      {availableModels.map((model) => (
+                        <MenuItem key={model.name} value={model.name}>
+                          {model.name}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                </Grid>
+                <Grid item xs={12}>
+                  <Typography id="temperature-slider" gutterBottom>
+                    Temperature: {systemConfig.temperature}
+                  </Typography>
+                  <Slider
+                    value={systemConfig.temperature}
+                    onChange={(e, newValue) => setSystemConfig({...systemConfig, temperature: newValue})}
+                    aria-labelledby="temperature-slider"
+                    step={0.1}
+                    marks
+                    min={0}
+                    max={2}
+                    valueLabelDisplay="auto"
+                  />
+                </Grid>
+                <Grid item xs={12}>
+                  <Typography id="max-tokens-slider" gutterBottom>
+                    Max Tokens: {systemConfig.max_tokens}
+                  </Typography>
+                  <Slider
+                    value={systemConfig.max_tokens}
+                    onChange={(e, newValue) => setSystemConfig({...systemConfig, max_tokens: newValue})}
+                    aria-labelledby="max-tokens-slider"
+                    step={128}
+                    marks
+                    min={256}
+                    max={4096}
+                    valueLabelDisplay="auto"
+                  />
+                </Grid>
+                <Grid item xs={12}>
+                  <Button 
+                    variant="contained" 
+                    onClick={handleUpdateSystemConfig}
+                    disabled={Object.values(modelLoadingStatus).some(status => status === true)}
+                  >
+                    Save Configuration
+                  </Button>
+                </Grid>
+              </Grid>
+            )}
+            
+            {settingsTab === 1 && (
+              <Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                  <Typography variant="h6">
+                    Available Models
+                  </Typography>
+                  <Button 
+                    variant="outlined" 
+                    onClick={fetchAvailableModels}
+                    disabled={refreshingModels}
+                    startIcon={refreshingModels ? <CircularProgress size={16} /> : <div>🔄</div>}
+                  >
+                    Refresh
+                  </Button>
+                </Box>
+                <List>
+                  {availableModels.map((model) => (
+                    <ListItem 
+                      key={model.name}
+                      secondaryAction={
+                        <Button 
+                          variant="contained"
+                          color={systemConfig.active_model === model.name ? "success" : "primary"}
+                          disabled={
+                            modelLoadingStatus[model.name] || 
+                            systemConfig.active_model === model.name ||
+                            Object.values(modelLoadingStatus).some(status => status === true)
+                          }
+                          onClick={() => handleLoadModel(model.name)}
+                        >
+                          {modelLoadingStatus[model.name] ? (
+                            <React.Fragment>
+                              <CircularProgress size={24} sx={{ mr: 1 }} /> Loading...
+                            </React.Fragment>
+                          ) : systemConfig.active_model === model.name ? (
+                            "Active"
+                          ) : (
+                            "Load Model"
+                          )}
+                        </Button>
+                      }
+                    >
+                      <ListItemText 
+                        primary={model.name} 
+                        secondary={
+                          <React.Fragment>
+                            <Typography component="span" variant="body2" sx={{ display: 'block' }}>
+                              Size: {model.size ? (model.size / (1024*1024*1024)).toFixed(1) + " GB" : "Unknown"}
+                            </Typography>
+                            <Typography component="span" variant="body2">
+                              Status: <span style={{ color: getModelStatusColor(model.name) }}>
+                                {getModelStatusLabel(model.name)}
+                              </span>
+                            </Typography>
+                          </React.Fragment>
+                        }
+                      />
+                    </ListItem>
+                  ))}
+                </List>
+              </Box>
+            )}
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setOpenSettings(false)}>Close</Button>
           </DialogActions>
         </Dialog>
         

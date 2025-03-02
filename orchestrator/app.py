@@ -6,7 +6,8 @@ import json
 import os
 import uuid
 import logging
-from typing import List, Dict, Optional
+import asyncio
+from typing import List, Dict, Optional, Set
 
 app = FastAPI(title="LLM Conversation Orchestrator")
 logging.basicConfig(level=logging.INFO)
@@ -26,21 +27,32 @@ app.add_middleware(
 OLLAMA_API_URL = os.environ.get("OLLAMA_API_URL", "http://host.docker.internal:11434/api")
 CHARACTERS_DIR = os.environ.get("CHARACTERS_DIR", "./characters")
 CONVERSATIONS_DIR = os.environ.get("CONVERSATIONS_DIR", "./conversations")
+CONFIG_DIR = os.environ.get("CONFIG_DIR", "./config")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "system_config.json")
 
 # Create directories if they don't exist
 os.makedirs(CHARACTERS_DIR, exist_ok=True)
 os.makedirs(CONVERSATIONS_DIR, exist_ok=True)
+os.makedirs(CONFIG_DIR, exist_ok=True)
 
 # Log the Ollama API URL at startup
 logger.info(f"Using Ollama API URL: {OLLAMA_API_URL}")
 
+# Track model loading status
+model_loading_status = {}
+model_loading_lock = asyncio.Lock()
+
+# System configuration with defaults
+DEFAULT_SYSTEM_CONFIG = {
+    "active_model": "deepseek:7b",
+    "temperature": 0.7,
+    "max_tokens": 1024
+}
+
 # Models
 class Character(BaseModel):
     name: str
-    model: str
     system_prompt: str
-    temperature: float = 0.7
-    max_tokens: int = 1024
     personality_traits: Optional[Dict[str, str]] = None
 
 class Message(BaseModel):
@@ -59,13 +71,97 @@ class ConversationRequest(BaseModel):
 
 class CharacterCreationRequest(BaseModel):
     name: str
-    model: str
     system_prompt: str
     personality_traits: Optional[Dict[str, str]] = None
+
+class SystemConfig(BaseModel):
+    active_model: str
     temperature: float = 0.7
     max_tokens: int = 1024
 
+class ModelLoadRequest(BaseModel):
+    model_name: str
+
+# Helper functions
+def load_system_config() -> SystemConfig:
+    """Load system configuration from file or create default if it doesn't exist"""
+    if not os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(DEFAULT_SYSTEM_CONFIG, f, indent=2)
+        return SystemConfig(**DEFAULT_SYSTEM_CONFIG)
+    
+    with open(CONFIG_FILE, "r") as f:
+        return SystemConfig(**json.load(f))
+
+def save_system_config(config: SystemConfig):
+    """Save system configuration to file"""
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config.dict(), f, indent=2)
+
 # API Endpoints
+@app.get("/system/config", response_model=SystemConfig)
+async def get_system_config():
+    """Get system configuration"""
+    try:
+        return load_system_config()
+    except Exception as e:
+        logger.error(f"Error loading system config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/system/config", response_model=SystemConfig)
+async def update_system_config(config: SystemConfig):
+    """Update system configuration"""
+    try:
+        save_system_config(config)
+        return config
+    except Exception as e:
+        logger.error(f"Error updating system config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/system/models", response_model=List[Dict])
+async def list_available_models():
+    """List all available models from Ollama"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{OLLAMA_API_URL}/tags")
+            models = response.json().get("models", [])
+            
+            # Add loading status information
+            for model in models:
+                model_name = model.get("name")
+                model["loading"] = model_loading_status.get(model_name, False)
+                
+            return models
+    except Exception as e:
+        logger.error(f"Error listing models: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/system/models/load", response_model=Dict)
+async def load_model(request: ModelLoadRequest):
+    """Initiate model loading"""
+    model_name = request.model_name
+    
+    try:
+        # Set loading status
+        async with model_loading_lock:
+            model_loading_status[model_name] = True
+        
+        # Start loading the model (non-blocking)
+        asyncio.create_task(perform_model_loading(model_name))
+        
+        return {"status": "loading", "model": model_name}
+    except Exception as e:
+        logger.error(f"Error initiating model loading: {e}")
+        # Reset loading status on error
+        async with model_loading_lock:
+            model_loading_status[model_name] = False
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/system/models/status", response_model=Dict[str, bool])
+async def get_model_loading_status():
+    """Get current model loading status"""
+    return model_loading_status
+
 @app.get("/characters", response_model=List[str])
 async def list_characters():
     """List all available characters"""
@@ -84,19 +180,7 @@ async def create_character(character: CharacterCreationRequest):
         if os.path.exists(character_path):
             raise HTTPException(status_code=400, detail=f"Character {character.name} already exists")
         
-        # Check if model exists in Ollama
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.get(f"{OLLAMA_API_URL}/tags")
-                models = response.json().get("models", [])
-                available_models = [model.get("name") for model in models]
-                
-                if character.model not in available_models:
-                    logger.warning(f"Model {character.model} not found in Ollama")
-            except Exception as e:
-                logger.warning(f"Could not verify model existence: {e}")
-        
-        # Create character file
+        # Create character file (using only personality traits, no model information)
         character_data = character.dict()
         with open(character_path, "w") as f:
             json.dump(character_data, f, indent=2)
@@ -260,11 +344,50 @@ async def health_check():
             return {
                 "status": "healthy",
                 "ollama_url": OLLAMA_API_URL,
-                "available_models": model_names
+                "available_models": model_names,
+                "active_model": load_system_config().active_model
             }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         return {"status": "unhealthy", "message": str(e)}
+
+async def perform_model_loading(model_name: str):
+    """Actually perform the model loading in background"""
+    try:
+        logger.info(f"Starting to load model: {model_name}")
+        
+        # Use Ollama's generate endpoint with a minimal prompt to load the model
+        async with httpx.AsyncClient(timeout=1800.0) as client:
+            response = await client.post(
+                f"{OLLAMA_API_URL}/generate",
+                json={
+                    "model": model_name,
+                    "prompt": "Hello",
+                    "temperature": 0.7,
+                    "max_tokens": 10,
+                    "stream": False
+                }
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Error loading model {model_name}: {response.text}")
+                raise Exception(f"Error loading model: {response.text}")
+            
+            logger.info(f"Successfully loaded model: {model_name}")
+            
+            # Update system config with new model
+            config = load_system_config()
+            config.active_model = model_name
+            save_system_config(config)
+            
+            # Update loading status
+            async with model_loading_lock:
+                model_loading_status[model_name] = False
+    except Exception as e:
+        logger.error(f"Error loading model {model_name}: {e}")
+        # Update loading status on error
+        async with model_loading_lock:
+            model_loading_status[model_name] = False
 
 async def generate_response(conversation: Conversation, character_name: str) -> str:
     """Generate a response from a character"""
@@ -273,6 +396,9 @@ async def generate_response(conversation: Conversation, character_name: str) -> 
         character_path = os.path.join(CHARACTERS_DIR, f"{character_name}.json")
         with open(character_path, "r") as f:
             character = Character(**json.load(f))
+        
+        # Load system config for model, temperature and max_tokens
+        system_config = load_system_config()
         
         # Create prompt for the model
         other_characters = [c for c in conversation.characters if c != character_name]
@@ -324,17 +450,17 @@ async def generate_response(conversation: Conversation, character_name: str) -> 
         prompt_text += f"{character_name} (あなた): "
         
         # Log the processed prompt for debugging
-        logger.info(f"Prompt for {character_name}:\n{prompt_text}")
+        logger.info(f"Prompt for {character_name} using model {system_config.active_model}:\n{prompt_text}")
         
         # Generate response using Ollama
         async with httpx.AsyncClient(timeout=1800.0) as client:
             response = await client.post(
                 f"{OLLAMA_API_URL}/generate",
                 json={
-                    "model": character.model,
+                    "model": system_config.active_model,
                     "prompt": prompt_text,
-                    "temperature": character.temperature,
-                    "max_tokens": character.max_tokens,
+                    "temperature": system_config.temperature,
+                    "max_tokens": system_config.max_tokens,
                     "stream": False
                 }
             )
