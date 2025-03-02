@@ -300,7 +300,7 @@ async def generate_response(conversation: Conversation, character_name: str) -> 
         logger.info(f"Prompt for {character_name}:\n{prompt_text}")
         
         # Generate response using Ollama
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(timeout=1800.0) as client:
             response = await client.post(
                 f"{OLLAMA_API_URL}/generate",
                 json={

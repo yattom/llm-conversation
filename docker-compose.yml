@@ -16,7 +16,7 @@ services:
               count: 1
               capabilities: [gpu]
         limits:
-          memory: 8G  # Limit memory usage to 8GB
+          memory: 40G  # Limit memory usage to 8GB
     restart: unless-stopped
 
   conversation-orchestrator:
