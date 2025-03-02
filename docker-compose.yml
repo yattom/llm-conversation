@@ -1,0 +1,43 @@
+version: '3'
+
+services:
+  llm-service:
+    image: ollama/ollama:latest
+    container_name: ollama-service
+    volumes:
+      - ./ollama-data:/root/.ollama
+    ports:
+      - "11434:11434"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 8G  # Limit memory usage to 8GB
+    restart: unless-stopped
+
+  conversation-orchestrator:
+    build:
+      context: ./orchestrator
+    container_name: conversation-orchestrator
+    volumes:
+      - ./conversations:/app/conversations
+      - ./characters:/app/characters
+    ports:
+      - "8000:8000"
+    depends_on:
+      - llm-service
+    restart: unless-stopped
+
+  web-ui:
+    build:
+      context: ./web-ui
+    container_name: conversation-ui
+    ports:
+      - "3000:3000"
+    depends_on:
+      - conversation-orchestrator
+    restart: unless-stopped
