@@ -238,7 +238,7 @@ function App() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ num_turns: 2 }),
+        body: JSON.stringify({ num_turns: 1 }),
       });
       
       if (response.ok) {

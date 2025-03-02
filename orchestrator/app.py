@@ -22,13 +22,17 @@ app.add_middleware(
 )
 
 # Configuration
-OLLAMA_API_URL = "http://llm-service:11434/api"
+# Update to use host.docker.internal to access Windows host Ollama
+OLLAMA_API_URL = os.environ.get("OLLAMA_API_URL", "http://host.docker.internal:11434/api")
 CHARACTERS_DIR = os.environ.get("CHARACTERS_DIR", "./characters")
 CONVERSATIONS_DIR = os.environ.get("CONVERSATIONS_DIR", "./conversations")
 
 # Create directories if they don't exist
 os.makedirs(CHARACTERS_DIR, exist_ok=True)
 os.makedirs(CONVERSATIONS_DIR, exist_ok=True)
+
+# Log the Ollama API URL at startup
+logger.info(f"Using Ollama API URL: {OLLAMA_API_URL}")
 
 # Models
 class Character(BaseModel):
@@ -239,6 +243,29 @@ async def continue_conversation(conversation_id: str, num_turns: int = Body(1, e
         logger.error(f"Error continuing conversation: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    try:
+        # Check if we can connect to Ollama
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{OLLAMA_API_URL}/tags")
+            if response.status_code != 200:
+                return {"status": "unhealthy", "message": "Cannot connect to Ollama"}
+            
+            # Return available models
+            models = response.json().get("models", [])
+            model_names = [model.get("name") for model in models]
+            
+            return {
+                "status": "healthy",
+                "ollama_url": OLLAMA_API_URL,
+                "available_models": model_names
+            }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {"status": "unhealthy", "message": str(e)}
+
 async def generate_response(conversation: Conversation, character_name: str) -> str:
     """Generate a response from a character"""
     try:
@@ -351,11 +378,6 @@ async def generate_response(conversation: Conversation, character_name: str) -> 
     except Exception as e:
         logger.error(f"Error generating response: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy"}
 
 if __name__ == "__main__":
     import uvicorn

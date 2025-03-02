@@ -1,24 +1,6 @@
 version: '3'
 
 services:
-  llm-service:
-    image: ollama/ollama:latest
-    container_name: ollama-service
-    volumes:
-      - ./ollama-data:/root/.ollama
-    ports:
-      - "11434:11434"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-        limits:
-          memory: 40G  # Limit memory usage to 8GB
-    restart: unless-stopped
-
   conversation-orchestrator:
     build:
       context: ./orchestrator
@@ -28,8 +10,8 @@ services:
       - ./characters:/app/characters
     ports:
       - "8000:8000"
-    depends_on:
-      - llm-service
+    environment:
+      - OLLAMA_API_URL=http://host.docker.internal:11434/api
     restart: unless-stopped
 
   web-ui:
